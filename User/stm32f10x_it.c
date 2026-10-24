@@ -23,6 +23,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f10x_it.h"
+#include "Delay.h"
 
 /** @addtogroup STM32F10x_StdPeriph_Template
   * @{
@@ -131,9 +132,11 @@ void PendSV_Handler(void)
   * @brief  This function handles SysTick Handler.
   * @param  None
   * @retval None
+  * @note   裸机优化版: 1ms系统时基, 供主循环分时隙调度
   */
 void SysTick_Handler(void)
 {
+    Delay_OnSysTickISR();
 }
 
 /******************************************************************************/

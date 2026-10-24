@@ -1,20 +1,24 @@
 ﻿/**
   ******************************************************************************
   * @file    User/main.c
-  * @brief   智能温室环境监控系统主程序
-  * @version V1.0
-  * @date    2026-09-20
+  * @brief   智能温室环境监控系统主程序(裸机优化版)
+  * @version V1.2
+  * @date    2026-10-25
   * @note    输入: DHT11温湿度 / 土壤湿度(D2-5-2K) / 烟雾传感器 / 双串口指令
   *          输出: OLED显示 / 多LED+蜂鸣器报警 / 电机与舵机联动
-  *          工作模式: 自动(报警联动执行器) 与 手动(串口指令) 可切换
-  *          主循环周期 1.5s
+  *          架构: SysTick 1ms时基 + 主循环分时隙调度(前后台系统)
+  *            - 串口指令: 每圈检查, 响应<几毫秒(原轮询版最坏1.5s)
+  *            - 报警联动: 每圈判定, 即时响应
+  *            - 烟雾消抖: 50ms双采样状态机, 非阻塞(原版阻塞Delay_ms(50))
+  *            - 传感器采集+串口打印: 1.5s周期时隙(协议与旧版逐字节一致)
   ******************************************************************************
- * @history
- *   V1.0  2026-09-20  注释规范化; 水位传感器替换为D2-5-2K土壤湿度模块
- *   V1.1  2026-10-25  报警阈值宏化统一(三端一致); USART1/USART3指令解析
- *                     合并为共用函数Parse_Command_Frame, DUOJ-1统一开窗180°
- ******************************************************************************
- */
+  * @history
+  *   V1.0  2026-09-20  注释规范化; 水位传感器替换为D2-5-2K土壤湿度模块
+  *   V1.1  2026-10-25  报警阈值宏化统一(三端一致); 双串口指令解析合并
+  *   V1.2  2026-10-25  裸机优化版: 分时隙调度+非阻塞消抖+即时命令响应
+  *                     (本分支bare-metal-opt专用, 主线main已迁移FreeRTOS)
+  ******************************************************************************
+  */
 //说明:
 //	VCC--3.3V/5V
 //	GND--GND
@@ -52,6 +56,10 @@
 #define ALARM_HUMI_MAX   85   // 空气湿度报警上限(%RH)
 #define ALARM_SOIL_MAX   40   // 土壤湿度报警上限(%, 超过视为过湿)
 
+/* ==================== 调度时隙配置 ==================== */
+#define SLOT_SENSOR_PERIOD_MS   1500  // 传感器采集周期(与旧版1.5s一致)
+#define SMOKE_DEBOUNCE_MS       50    // 烟雾消抖确认时长
+
 /* ==================== 全局状态变量 ==================== */
 u8 temperature;  // 温度变量
 u8 humidity;     // 湿度变量
@@ -62,28 +70,29 @@ uint8_t servo_angle = 0;  // 舵机当前角度状态(0或180)
 uint8_t manual_mode = 0;  // 手动控制模式(1=串口手动控制,0=自动报警控制)
 uint8_t motor_status = 0;  // 电机状态(0=停止,1=运行)
 
+/* ==================== 烟雾消抖状态机(非阻塞) ==================== */
+static uint8_t  smoke_pending = 0;      // 候选报警状态(首次采到低电平置1)
+static uint32_t smoke_pending_tick = 0; // 候选开始时刻
+
 /**
   * @brief  初始化所有报警相关硬件(传感器/报警LED/蜂鸣器)
-  * @param  无
-  * @retval 无
-  * @note   LED均为低电平点亮; 初始状态全灭, 蜂鸣器关闭
   */
 void Alarm_Hardware_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
-    
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);  // 使能PA端口时钟
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);  // 使能PB端口时钟
-    
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+
     // 烟雾传感器(PA6)
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;  // 上拉输入
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    // 红灯LED(PB10)——原PA1被舵机TIM2_CH2占用;注意PB10=USART3_TX,串口3将不能发送
+    // 红灯LED(PB10)——注意PB10=USART3_TX,串口3将不能发送
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;  // 推挽输出
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
     GPIO_Init(GPIOB, &GPIO_InitStructure);
 
     // 黄灯LED(PB0)
@@ -115,23 +124,26 @@ void Alarm_Hardware_Init(void)
 }
 
 /**
-  * @brief  检测空气质量状态(烟雾传感器)
-  * @param  无
-  * @retval 无
-  * @note   PA6低电平(消抖50ms后仍为低)判定为"bad", 否则"nice"
+  * @brief  烟雾检测(50ms双采样消抖, 非阻塞)
+  * @note   连续50ms低电平才判定bad; 高电平立即恢复nice并复位状态机
   */
 void Check_Air_Quality(void)
 {
-    if(SMOKE_DOUT == 0)
+    if (SMOKE_DOUT == 0)
     {
-        Delay_ms(50);  // 延时消抖
-        if(SMOKE_DOUT == 0)
+        if (smoke_pending == 0)
         {
-            strcpy(air_status, "bad");
+            smoke_pending = 1;                          // 记录候选起点
+            smoke_pending_tick = Delay_GetTick();
+        }
+        else if (Delay_IsTimeout(smoke_pending_tick, SMOKE_DEBOUNCE_MS))
+        {
+            strcpy(air_status, "bad");                  // 持续低电平满50ms
         }
     }
     else
     {
+        smoke_pending = 0;                              // 复位消抖状态机
         strcpy(air_status, "nice");
     }
 }
@@ -140,26 +152,19 @@ void Check_Air_Quality(void)
   * @brief  解析一条完整的串口指令帧(USART1/USART3共用同一入口)
   * @param  buf: 指令帧缓冲区(不含帧尾\r\n)
   * @param  len: 指令长度
-  * @note   指令集: mode-0/mode-1 切换自动/手动模式;
-  *         DUOJ-0/DUOJ-1 舵机关窗(0°)/开窗(180°);
-  *         MOTOR-0/MOTOR-1 电机停止/全速(设备指令仅手动模式生效)
-  *         两条串口走同一解析函数, 保证指令行为完全一致
   */
 static void Parse_Command_Frame(const char *buf, u16 len)
 {
-    // 检测模式切换指令
     if(len >= 6 && strncmp(buf, "mode-0", 6) == 0)
     {
-        manual_mode = 0;  // 切换到自动模式
+        manual_mode = 0;
     }
     else if(len >= 6 && strncmp(buf, "mode-1", 6) == 0)
     {
-        manual_mode = 1;  // 切换到手动模式
+        manual_mode = 1;
     }
-    // 只有在手动模式下才处理设备控制指令
     else if(manual_mode)
     {
-        // 检测舵机控制指令(开窗角度与自动模式报警联动一致, 均为180°)
         if(len >= 6 && strncmp(buf, "DUOJ-0", 6) == 0)
         {
             Servo_SetAngle(0);
@@ -170,92 +175,68 @@ static void Parse_Command_Frame(const char *buf, u16 len)
             Servo_SetAngle(180);
             servo_angle = 180;
         }
-        // 检测电机控制指令
         else if(len >= 7 && strncmp(buf, "MOTOR-0", 7) == 0)
         {
-            Motor_SetSpeed(0);  // 停止电机
+            Motor_SetSpeed(0);
             motor_status = 0;
         }
         else if(len >= 7 && strncmp(buf, "MOTOR-1", 7) == 0)
         {
-            Motor_SetSpeed(100);  // 启动电机全速
+            Motor_SetSpeed(100);
             motor_status = 1;
         }
     }
 }
 
 /**
-  * @brief  处理USART1/USART3的串口指令
-  * @param  无
-  * @retval 无
-  * @note   两条串口的接收帧统一交给 Parse_Command_Frame 解析,
-  *         避免两处独立实现导致指令行为不一致
+  * @brief  处理USART1/USART3的串口指令(每圈调用, 毫秒级响应)
   */
 void Process_Serial_Command(void)
 {
-    // 处理USART1的指令
-    if(USART_RX_STA & 0x8000)  // 接收完成
+    if(USART_RX_STA & 0x8000)
     {
-        u16 len = USART_RX_STA & 0x3FFF;  // 获取接收长度
+        u16 len = USART_RX_STA & 0x3FFF;
         Parse_Command_Frame((const char*)USART_RX_BUF, len);
-        USART_RX_STA = 0;  // 清除接收标志
+        USART_RX_STA = 0;
     }
 
-    // 处理USART3的指令(与USART1共用同一解析入口)
-    if(USART3_RX_STA & 0x8000)  // 接收完成
+    if(USART3_RX_STA & 0x8000)
     {
-        u16 len = USART3_RX_STA & 0x3FFF;  // 获取接收长度
+        u16 len = USART3_RX_STA & 0x3FFF;
         Parse_Command_Frame((const char*)USART3_RX_BUF, len);
-        USART3_RX_STA = 0;  // 清除接收标志
+        USART3_RX_STA = 0;
     }
 }
 
 /**
-  * @brief  处理报警逻辑
-  * @param  无
+  * @brief  处理报警逻辑(每圈调用, 即时联动)
   * @retval 1:温湿度报警触发; 0:未触发
-  * @note   统一阈值(与上位机/小程序一致):
-  *         温度>ALARM_TEMP_MAX或湿度>ALARM_HUMI_MAX -> 黄灯;
-  *         土壤湿度>ALARM_SOIL_MAX -> 蓝灯;
-  *         空气为bad -> 红灯+浓烟灯; 任一报警 -> 蜂鸣器
-  *         自动模式下由报警联动执行器(烟雾->电机全速, 温湿度->舵机开窗180°)
   */
 uint8_t Handle_Alarms(void)
 {
-    // 1. 温湿度报警判断
     uint8_t temp_humi_alarm = (temperature > ALARM_TEMP_MAX || humidity > ALARM_HUMI_MAX) ? 1 : 0;
-
-    // 2. 土壤湿度过湿报警判断(湿度>ALARM_SOIL_MAX视为过湿; 若想改为"过干报警"把 > 改成 <)
     uint8_t water_alarm = (water_percent > ALARM_SOIL_MAX) ? 1 : 0;
-
-    // 3. 烟雾报警判断(空气质量为bad)
     uint8_t smoke_alarm = (strcmp(air_status, "bad") == 0) ? 1 : 0;
 
-    // 控制对应LED
-    YELLOW_LED = temp_humi_alarm ? 0 : 1;  // 低电平点亮
+    YELLOW_LED = temp_humi_alarm ? 0 : 1;
     BLUE_LED = water_alarm ? 0 : 1;
     RED_LED = smoke_alarm ? 0 : 1;
-    SMOKE_ALARM_LED = smoke_alarm ? 0 : 1;  // 烟雾浓度报警LED
-
-    // 控制蜂鸣器(任一报警即触发)
+    SMOKE_ALARM_LED = smoke_alarm ? 0 : 1;
     BEEP = (temp_humi_alarm || water_alarm || smoke_alarm) ? 0 : 1;
 
-    // 只有在自动模式下才由报警状态控制执行器
     if (!manual_mode)
     {
-        // 控制电机(烟雾报警时全速转动)
         if (smoke_alarm)
         {
-            Motor_SetSpeed(100);  // 全速正转
+            Motor_SetSpeed(100);
             motor_status = 1;
         }
         else
         {
-            Motor_SetSpeed(0);    // 停止
+            Motor_SetSpeed(0);
             motor_status = 0;
         }
 
-        // 控制舵机(温湿度报警时转动180度)
         if (temp_humi_alarm)
         {
             Servo_SetAngle(180);
@@ -268,86 +249,99 @@ uint8_t Handle_Alarms(void)
         }
     }
 
-    // 返回温湿度报警状态
     return temp_humi_alarm;
 }
 
 /**
-  * @brief  程序主入口
-  * @param  无
-  * @retval 无
-  * @note   初始化全部外设后, 进入1.5s周期的数据采集/显示/报警主循环
+  * @brief  传感器采集时隙: DHT11+土壤湿度+OLED数值刷新+串口协议输出
+  * @note   1.5s周期执行; 串口文本与V1.1逐字节一致(上位机零改动)
+  */
+static void Sensor_Acquire_Slot(void)
+{
+    uint8_t temp_humi_alarm_status;
+
+    /* ---- DHT11(阻塞约25ms, DWT延时, 中断照常) ---- */
+    if(DHT11_Read_Data(&temperature, &humidity) == 0)
+    {
+        printf("Temp:%dC   Humi:%d%%RH   ", temperature, humidity);
+        OLED_ShowNum(1, 6, temperature, 2);
+        OLED_ShowNum(2, 6, humidity, 2);
+        OLED_ShowString(4, 5, "       ");
+    }
+    else
+    {
+        printf("DHT11 Read Failed!   ");
+        OLED_ShowString(4, 5, "Error!");
+    }
+
+    /* ---- 土壤湿度 ---- */
+    water_level = ADC1_GetValue(ADC_Channel_0);
+    water_percent = Soil_GetMoisturePercent();
+    printf("Soil:%d%%(raw=%d)  ", water_percent, water_level);
+    OLED_ShowNum(3, 12, water_percent, 3);
+
+    /* ---- 报警判定与执行器联动(即时) ---- */
+    temp_humi_alarm_status = Handle_Alarms();
+
+    /* ---- 协议尾行(与旧版一致) ---- */
+    printf("Servo:%s Motor:%s ",
+           (servo_angle == 180) ? "ON " : "OFF",
+           (motor_status == 1) ? "ON " : "OFF");
+
+    if (temp_humi_alarm_status || (water_percent > ALARM_SOIL_MAX) || (strcmp(air_status, "bad") == 0))
+    {
+        printf("Air:%s Warning\r\n", air_status);
+    }
+    else
+    {
+        printf("Air:%s\r\n", air_status);
+    }
+}
+
+/**
+  * @brief  程序主入口(分时隙调度)
   */
 int main(void)
 {
-    uint8_t temp_humi_alarm_status;  // 温湿度报警状态
+    uint32_t last_sensor_tick = 0;
 
-    uart_init(9600);     // 初始化串口1,波特率9600
-    uart3_init(9600);    // 初始化串口3,波特率9600
-    DHT11_Init();        // 初始化DHT11温湿度传感器
-    OLED_Init();         // 初始化OLED显示屏
-    ADC1_Init();         // 初始化ADC(土壤湿度传感器)
-    Alarm_Hardware_Init();// 初始化所有报警硬件
-    Motor_Init();        // 初始化电机
-    Servo_Init();        // 初始化舵机
-    Servo_SetAngle(0);   // 舵机初始位置0度
-    OLED_Clear();        // 清屏
+    uart_init(9600);
+    uart3_init(9600);
+    DHT11_Init();
+    OLED_Init();
+    ADC1_Init();
+    Alarm_Hardware_Init();
+    Motor_Init();
+    Servo_Init();
+    Servo_SetAngle(0);
+    OLED_Clear();
+    Delay_Init();          // DWT使能 + SysTick 1ms时基(必须在各驱动延时前)
 
-    // 固定显示标识
-    OLED_ShowString(1, 1, "Temp:  C");  // 第一行显示温度标识
-    OLED_ShowString(2, 1, "Humi:  %RH");// 第二行显示湿度标识
-    OLED_ShowString(3, 1, "Soil Water:");  // 第三行显示土壤湿度标签(占第1~11列)
-    OLED_ShowChar(3, 15, '%');             // 百分号固定在第15列(数值占第12~14列)
-    OLED_ShowString(4, 1, "Air: ");      // 第四行显示空气质量标识
+    OLED_ShowString(1, 1, "Temp:  C");
+    OLED_ShowString(2, 1, "Humi:  %RH");
+    OLED_ShowString(3, 1, "Soil Water:");
+    OLED_ShowChar(3, 15, '%');
+    OLED_ShowString(4, 1, "Air: ");
 
     while(1)
     {
-        // 读取温湿度数据
-        if(DHT11_Read_Data(&temperature, &humidity) == 0)  // 成功读取数据
-        {
-            // 串口打印
-            printf("Temp:%dC   Humi:%d%%RH   ", temperature, humidity);
-            OLED_ShowNum(1, 6, temperature, 2);  // OLED显示温度
-            OLED_ShowNum(2, 6, humidity, 2);    // OLED显示湿度
-            OLED_ShowString(4, 5, "       ");   // 清除错误信息
-        }
-        else
-        {
-            printf("DHT11 Read Failed!   ");            // 读取失败时提示
-            OLED_ShowString(4, 5, "Error!");  // 显示错误信息
-        }
-
-        // 读取土壤湿度数据(D2-5-2K电容式,读数与湿度成反比)
-        water_level = ADC1_GetValue(ADC_Channel_0);        // 读取原始ADC值(越干越大)
-        water_percent = Soil_GetMoisturePercent();         // 反比映射为湿度百分比
-        printf("Soil:%d%%(raw=%d)  ", water_percent, water_level);  // 打印百分比+raw(便于校准)
-        OLED_ShowNum(3, 12, water_percent, 3);       // OLED显示湿度百分比(占第12~14列)
-
-        // 检测空气质量
-        Check_Air_Quality();
-        OLED_ShowString(4, 5, air_status);        // 显示空气质量状态
-
-        // 处理串口指令
+        /* 时隙1: 串口指令——每圈检查, 毫秒级响应(优化点) */
         Process_Serial_Command();
 
-        // 处理报警逻辑
-        temp_humi_alarm_status = Handle_Alarms();
+        /* 时隙2: 烟雾消抖——非阻塞状态机, 每圈采样(优化点) */
+        Check_Air_Quality();
+        OLED_ShowString(4, 5, air_status);
 
-        // 打印舵机和电机状态(根据实际状态显示)
-        printf("Servo:%s Motor:%s ",
-               (servo_angle == 180) ? "ON " : "OFF",
-               (motor_status == 1) ? "ON " : "OFF");
+        /* 时隙3: 报警联动——每圈判定, 无需等采集周期(优化点) */
+        Handle_Alarms();
 
-        // 打印Air状态,根据报警状态决定是否附加Warning(在输出Air状态后,不换行)
-        if (temp_humi_alarm_status || (water_percent > ALARM_SOIL_MAX) || (strcmp(air_status, "bad") == 0))
+        /* 时隙4: 传感器采集——1.5s周期(打印协议在此, 周期不变) */
+        if (Delay_IsTimeout(last_sensor_tick, SLOT_SENSOR_PERIOD_MS))
         {
-            printf("Air:%s Warning\r\n", air_status);  // 有报警时附加Warning
-        }
-        else
-        {
-            printf("Air:%s\r\n", air_status);  // 无报警时正常打印
+            last_sensor_tick = Delay_GetTick();
+            Sensor_Acquire_Slot();
         }
 
-        Delay_ms(1500);  // 1.5秒读取一次
+        /* 无阻塞等待: 主循环全速轮询, 空闲由WFI让出总线(可选) */
     }
 }
