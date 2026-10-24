@@ -1,6 +1,24 @@
+ï»¿/**
+  ******************************************************************************
+  * @file    System/DHT11.c
+  * @brief   DHT11 æ¸©æ¹¿åº¦ä¼ æ„Ÿå™¨é©±åŠ¨å®ç°(å•æ€»çº¿åè®®)
+  * @version V1.0
+  * @date    2026-09-20
+  * @note    æ•°æ®è„š: PA15(éœ€å…ˆé‡Šæ”¾JTAGå¤ç”¨); å•æ€»çº¿æ—¶åº, å¸¦æ ¡éªŒå’ŒéªŒè¯
+  ******************************************************************************
+  * @history
+  *   V1.0  2026-09-20  é¦–æ¬¡å‘å¸ƒ(æ³¨é‡Šè§„èŒƒåŒ–)
+  ******************************************************************************
+  */
 #include "dht11.h"
 #include "delay.h"
 
+/**
+  * @brief  é…ç½®DHT11æ•°æ®è„šä¸ºè¾“å‡ºæ¨¡å¼(æ¨æŒ½)
+  * @param  æ— 
+  * @retval æ— 
+  * @note   åŒæ—¶æ‰§è¡ŒSWJ_JTAGDisableä»¥é‡Šæ”¾PA15
+  */
 void DHT11_IO_OUT(void)
 {
 	GPIO_InitTypeDef  GPIO_InitStructure;
@@ -14,6 +32,11 @@ void DHT11_IO_OUT(void)
  	GPIO_Init(DHT11_GPIO_PORT, &GPIO_InitStructure);				
 }
 
+/**
+  * @brief  é…ç½®DHT11æ•°æ®è„šä¸ºè¾“å…¥æ¨¡å¼(æµ®ç©º)
+  * @param  æ— 
+  * @retval æ— 
+  */
 void DHT11_IO_IN(void)
 {
 	GPIO_InitTypeDef  GPIO_InitStructure;
@@ -26,30 +49,38 @@ void DHT11_IO_IN(void)
  	GPIO_Init(DHT11_GPIO_PORT, &GPIO_InitStructure);				 
 }
 
-//¸´Î»DHT11
+/**
+  * @brief  å¤ä½DHT11(ä¸»æœºå‘èµ·èµ·å§‹ä¿¡å·)
+  * @param  æ— 
+  * @retval æ— 
+  * @note   æ‹‰ä½DQè‡³å°‘18ms, å†æ‹‰é«˜20~40us
+  */
 void DHT11_Rst(void)	   
 {                 
 	DHT11_IO_OUT(); 	//SET OUTPUT
-  DHT11_DQ_OUT=0; 	//À­µÍDQ
-  Delay_ms(20);    	//À­µÍÖÁÉÙ18ms
+  DHT11_DQ_OUT=0; 	//æ‹‰ä½DQ
+  Delay_ms(20);    	//æ‹‰ä½è‡³å°‘18ms
   DHT11_DQ_OUT=1; 	//DQ=1 
-	Delay_us(30);     	//Ö÷»úÀ­¸ß20~40us
+	Delay_us(30);     	//ä¸»æœºæ‹‰é«˜20~40us
 }
-//µÈ´ıDHT11µÄ»ØÓ¦
-//·µ»Ø1:Î´¼ì²âµ½DHT11µÄ´æÔÚ
-//·µ»Ø0:´æÔÚ
+/**
+  * @brief  ç­‰å¾…DHT11åº”ç­”ä¿¡å·
+  * @param  æ— 
+  * @retval 0:åº”ç­”æ­£å¸¸; 1:æœªæ£€æµ‹åˆ°DHT11
+  * @note   DHT11åº”ç­”: å…ˆæ‹‰ä½40~80us, å†æ‹‰é«˜40~80us
+  */
 u8 DHT11_Check(void) 	   
 {   
 	u8 retry=0;
 	DHT11_IO_IN();//SET INPUT	 
-    while (DHT11_DQ_IN&&retry<100)//DHT11»áÀ­µÍ40~80us
+    while (DHT11_DQ_IN&&retry<100)//DHT11ä¼šæ‹‰ä½40~80us
 	{
 		retry++;
 		Delay_us(1);
 	};	 
 	if(retry>=100)return 1;
 	else retry=0;
-    while (!DHT11_DQ_IN&&retry<100)//DHT11À­µÍºó»áÔÙ´ÎÀ­¸ß40~80us
+    while (!DHT11_DQ_IN&&retry<100)//DHT11æ‹‰ä½åä¼šå†æ¬¡æ‹‰é«˜40~80us
 	{
 		retry++;
 		Delay_us(1);
@@ -57,28 +88,35 @@ u8 DHT11_Check(void)
 	if(retry>=100)return 1;	    
 	return 0;
 }
-//´ÓDHT11¶ÁÈ¡Ò»¸öÎ»
-//·µ»ØÖµ£º1/0
+/**
+  * @brief  ä»DHT11è¯»å–ä¸€ä¸ªä½
+  * @param  æ— 
+  * @retval 1æˆ–0
+  * @note   é«˜ç”µå¹³æŒç»­40usåé‡‡æ ·: é«˜ç”µå¹³çº¦26~28usä¸º0, çº¦70usä¸º1
+  */
 u8 DHT11_Read_Bit(void) 			 
 {
  	u8 retry=0;
-	while(DHT11_DQ_IN&&retry<100)//µÈ´ı±äÎªµÍµçÆ½
+	while(DHT11_DQ_IN&&retry<100)//ç­‰å¾…å˜ä¸ºä½ç”µå¹³
 	{
 		retry++;
 		Delay_us(1);
 	}
 	retry=0;
-	while(!DHT11_DQ_IN&&retry<100)//µÈ´ı±ä¸ßµçÆ½
+	while(!DHT11_DQ_IN&&retry<100)//ç­‰å¾…å˜é«˜ç”µå¹³
 	{
 		retry++;
 		Delay_us(1);
 	}
-	Delay_us(40);//µÈ´ı40us
+	Delay_us(40);//ç­‰å¾…40us
 	if(DHT11_DQ_IN)return 1;
 	else return 0;		   
 }
-//´ÓDHT11¶ÁÈ¡Ò»¸ö×Ö½Ú
-//·µ»ØÖµ£º¶Áµ½µÄÊı¾İ
+/**
+  * @brief  ä»DHT11è¯»å–ä¸€ä¸ªå­—èŠ‚
+  * @param  æ— 
+  * @retval è¯»åˆ°çš„8ä½æ•°æ®
+  */
 u8 DHT11_Read_Byte(void)    
 {        
 	u8 i,dat;
@@ -90,10 +128,13 @@ u8 DHT11_Read_Byte(void)
   }						    
   return dat;
 }
-//´ÓDHT11¶ÁÈ¡Ò»´ÎÊı¾İ
-//temp:ÎÂ¶ÈÖµ(·¶Î§:0~50¡ã)
-//humi:Êª¶ÈÖµ(·¶Î§:20%~90%)
-//·µ»ØÖµ£º0,Õı³£;1,¶ÁÈ¡Ê§°Ü
+/**
+  * @brief  ä»DHT11è¯»å–ä¸€æ¬¡æ¸©æ¹¿åº¦æ•°æ®(40ä½)
+  * @param  temp: æ¸©åº¦å€¼è¾“å‡ºæŒ‡é’ˆ(èŒƒå›´çº¦0~50Â°C)
+  * @param  humi: æ¹¿åº¦å€¼è¾“å‡ºæŒ‡é’ˆ(èŒƒå›´çº¦20%~90%RH)
+  * @retval 0:è¯»å–æˆåŠŸ; 1:è¯»å–å¤±è´¥
+  * @note   ä»…å½“æ ¡éªŒå’Œ(buf[0]+buf[1]+buf[2]+buf[3]==buf[4])é€šè¿‡æ—¶æ‰æ›´æ–°è¾“å‡º
+  */
 u8 DHT11_Read_Data(u8 *temp,u8 *humi)    
 {        
  	u8 buf[5];
@@ -101,7 +142,7 @@ u8 DHT11_Read_Data(u8 *temp,u8 *humi)
 	DHT11_Rst();
 	if(DHT11_Check()==0)
 	{
-		for(i=0;i<5;i++)//¶ÁÈ¡40Î»Êı¾İ
+		for(i=0;i<5;i++)//è¯»å–40ä½æ•°æ®
 		{
 			buf[i]=DHT11_Read_Byte();
 		}
@@ -113,15 +154,17 @@ u8 DHT11_Read_Data(u8 *temp,u8 *humi)
 	}else return 1;
 	return 0;	    
 }
-//³õÊ¼»¯DHT11µÄIO¿Ú DQ Í¬Ê±¼ì²âDHT11µÄ´æÔÚ
-//·µ»Ø1:²»´æÔÚ
-//·µ»Ø0:´æÔÚ    	 
+/**
+  * @brief  DHT11åˆå§‹åŒ–(å¤ä½å¹¶æ£€æµ‹å™¨ä»¶æ˜¯å¦å­˜åœ¨)
+  * @param  æ— 
+  * @retval 0:å™¨ä»¶å­˜åœ¨; 1:å™¨ä»¶ä¸å­˜åœ¨
+  */
 u8 DHT11_Init(void)
 {	 
  	
 			    
-	DHT11_Rst();  //¸´Î»DHT11
-	return DHT11_Check();//µÈ´ıDHT11µÄ»ØÓ¦
+	DHT11_Rst();  //å¤ä½DHT11
+	return DHT11_Check();//ç­‰å¾…DHT11çš„å›åº”
 } 
 
 

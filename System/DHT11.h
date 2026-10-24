@@ -1,34 +1,31 @@
+ï»¿/**
+  ******************************************************************************
+  * @file    System/DHT11.h
+  * @brief   DHT11 æ¸©æ¹¿åº¦ä¼ æ„Ÿå™¨é©±åŠ¨å¤´æ–‡ä»¶
+  * @version V1.0
+  * @date    2026-09-20
+  * @note    æ•°æ®è„š: PA15(éœ€é‡Šæ”¾JTAG); æ¨¡å—ä¾›ç”µ3.3~5.5V
+  ******************************************************************************
+  * @history
+  *   V1.0  2026-09-20  é¦–æ¬¡å‘å¸ƒ(æ³¨é‡Šè§„èŒƒåŒ–)
+  ******************************************************************************
+  */
 #ifndef __DHT11_H
 #define __DHT11_H 
 #include "sys.h"   
 
-////IO²Ù×÷º¯Êı											   
-#define	DHT11_DQ_OUT PAout(15) //Êı¾İ¶Ë¿Ú	PA15 
-#define	DHT11_DQ_IN  PAin(15)  //Êı¾İ¶Ë¿Ú	PA15
+/* IOæ–¹å‘è®¾ç½®(ä½å¸¦æ“ä½œ) */
+#define	DHT11_DQ_OUT PAout(15) //æ•°æ®ç«¯å£è¾“å‡º PA15 
+#define	DHT11_DQ_IN  PAin(15)  //æ•°æ®ç«¯å£è¾“å…¥ PA15
 
-#define DHT11_GPIO_PORT    	GPIOA			              //GPIO¶Ë¿Ú
-#define DHT11_GPIO_CLK 	    RCC_APB2Periph_GPIOA		//GPIO¶Ë¿ÚÊ±ÖÓ
-#define DHT11_GPIO_PIN		GPIO_Pin_15			        //Á¬½Óµ½SCLÊ±ÖÓÏßµÄGPIO
+#define DHT11_GPIO_PORT    	GPIOA			              //æ•°æ®å£GPIOç«¯å£
+#define DHT11_GPIO_CLK 	    RCC_APB2Periph_GPIOA		//GPIOç«¯å£æ—¶é’Ÿ
+#define DHT11_GPIO_PIN		GPIO_Pin_15			        //æ•°æ®å¼•è„š
 
-u8 DHT11_Init(void);//³õÊ¼»¯DHT11
-u8 DHT11_Read_Data(u8 *temp,u8 *humi);//¶ÁÈ¡ÎÂÊª¶È
-u8 DHT11_Read_Byte(void);//¶Á³öÒ»¸ö×Ö½Ú
-u8 DHT11_Read_Bit(void);//¶Á³öÒ»¸öÎ»
-u8 DHT11_Check(void);//¼ì²âÊÇ·ñ´æÔÚDHT11
-void DHT11_Rst(void);//¸´Î»DHT11    
+u8 DHT11_Init(void);          //åˆå§‹åŒ–DHT11
+u8 DHT11_Read_Data(u8 *temp,u8 *humi); //è¯»å–æ¸©æ¹¿åº¦æ•°æ®
+u8 DHT11_Read_Byte(void);     //è¯»å–ä¸€ä¸ªå­—èŠ‚
+u8 DHT11_Read_Bit(void);      //è¯»å–ä¸€ä¸ªä½
+u8 DHT11_Check(void);         //æ£€æµ‹DHT11æ˜¯å¦åº”ç­”
+void DHT11_Rst(void);         //å¤ä½DHT11    
 #endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
